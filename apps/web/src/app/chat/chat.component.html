@@ -1,0 +1,78 @@
+<section class="layout">
+  <div class="chat-pane">
+    <div class="messages">
+      @for (message of messages(); track trackMessage($index, message)) {
+        <article class="message" [class.user]="message.role === 'user'" [class.assistant]="message.role === 'assistant'">
+          <header>
+            <span class="role">{{ message.role }}</span>
+            @if (message.pending) {
+              <span class="pending-dot" aria-label="streaming"></span>
+            }
+          </header>
+          <p>{{ message.content }}</p>
+        </article>
+      } @empty {
+        <p class="empty">Ask the assistant a question about a CBA clause.</p>
+      }
+
+      @for (tool of toolCallsList(); track trackTool($index, tool)) {
+        <article class="tool-pill" [class.running]="tool.status === 'running'">
+          <header>
+            <span class="tool-name">{{ tool.name }}</span>
+            <span class="tool-status">{{ tool.status }}</span>
+          </header>
+          @if (tool.args) {
+            <pre class="tool-args">{{ tool.args }}</pre>
+          }
+          @if (tool.result) {
+            <details class="tool-result">
+              <summary>Result</summary>
+              <pre>{{ tool.result }}</pre>
+            </details>
+          }
+        </article>
+      }
+    </div>
+
+    <form class="composer" (ngSubmit)="onSend()">
+      <input
+        type="text"
+        name="prompt"
+        [ngModel]="draft()"
+        (ngModelChange)="draft.set($event)"
+        placeholder="Ask about a CBA clause..."
+        [disabled]="isRunning()"
+        autocomplete="off"
+      />
+      @if (isRunning()) {
+        <button type="button" class="stop" (click)="onStop()">Stop</button>
+      } @else {
+        <button type="submit" class="send" [disabled]="!draft().trim()">Send</button>
+      }
+      <button type="button" class="reset" (click)="onReset()" title="Reset thread">Reset</button>
+    </form>
+
+    @if (error()) {
+      <div class="error">{{ error() }}</div>
+    }
+  </div>
+
+  <aside class="context-pane">
+    <h2>Context state</h2>
+    <p class="hint">Updated incrementally via <code>STATE_DELTA</code> events.</p>
+
+    @if (citedClauses().length === 0) {
+      <p class="empty">No cited clauses yet.</p>
+    } @else {
+      <ul class="clauses">
+        @for (clause of citedClauses(); track trackClause($index, clause)) {
+          <li>
+            <h3>{{ clause.section }}</h3>
+            <span class="union">{{ clause.union }}</span>
+            <p>{{ clause.excerpt }}</p>
+          </li>
+        }
+      </ul>
+    }
+  </aside>
+</section>

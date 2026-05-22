@@ -1,0 +1,34 @@
+:root {
+  color-scheme: light dark;
+  --bg: #0f1115;
+  --panel: #161a21;
+  --panel-2: #1d222b;
+  --text: #e7ecf3;
+  --text-dim: #8b95a7;
+  --accent: #5b8def;
+  --accent-dim: #2c4a8f;
+  --border: #262b35;
+  --tool: #f5a623;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
+    'Helvetica Neue', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+button {
+  font-family: inherit;
+}
