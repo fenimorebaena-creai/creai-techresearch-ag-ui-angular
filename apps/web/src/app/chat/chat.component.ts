@@ -1,4 +1,13 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  ElementRef,
+  computed,
+  effect,
+  inject,
+  signal,
+  viewChild,
+} from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { AgentService } from './agent.service';
 import { ChatMessage, ToolCall } from './ag-ui.types';
@@ -38,6 +47,22 @@ export class ChatComponent {
   protected readonly isRunning = computed(() => this.status() === 'running');
 
   protected readonly draft = signal<string>('What is the overtime rate?');
+
+  private readonly messagesEl = viewChild<ElementRef<HTMLElement>>('messagesList');
+
+  constructor() {
+    // Keep the latest message/tool-call in view as the stream grows.
+    effect(() => {
+      this.messages();
+      this.toolCallsList();
+      const el = this.messagesEl()?.nativeElement;
+      if (el) {
+        requestAnimationFrame(() => {
+          el.scrollTop = el.scrollHeight;
+        });
+      }
+    });
+  }
 
   protected onSend(): void {
     const text = this.draft().trim();

@@ -6,7 +6,10 @@
 .layout {
   display: grid;
   grid-template-columns: 1fr 360px;
+  grid-template-rows: minmax(0, 1fr);
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
   gap: 0;
 }
 
@@ -15,6 +18,9 @@
   flex-direction: column;
   border-right: 1px solid var(--border);
   min-width: 0;
+  /* Grid/flex items default to min-height:auto, which lets the pane grow with
+     its content and push the composer off-screen. Pin it so .messages scrolls. */
+  min-height: 0;
 }
 
 .messages {

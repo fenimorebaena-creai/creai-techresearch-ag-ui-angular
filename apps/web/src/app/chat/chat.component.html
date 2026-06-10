@@ -1,6 +1,6 @@
 <section class="layout">
   <div class="chat-pane">
-    <div class="messages">
+    <div class="messages" #messagesList>
       @for (message of messages(); track trackMessage($index, message)) {
         <article class="message" [class.user]="message.role === 'user'" [class.assistant]="message.role === 'assistant'">
           <header>

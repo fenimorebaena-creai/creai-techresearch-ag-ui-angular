@@ -54,5 +54,5 @@ apps/api/.venv/
 
 # Local scratch / E2E artifacts
 .playwright-mcp/
-e2e-demo-overtime.png
+/*.png
 google-chrome-stable_current_amd64.deb
