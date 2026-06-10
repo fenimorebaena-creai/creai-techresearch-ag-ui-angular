@@ -46,3 +46,23 @@ curl -N -X POST http://localhost:8001/agent \
 ```
 
 You should see a sequence of `event: <name>` / `data: <json>` pairs.
+
+## Responses
+
+By default the agent is deterministic: `src/responses.py` routes each message to a
+Labor-Relations intent by keyword (overtime, holiday, seniority, grievance,
+leave) and picks a randomly-varied intro/answer plus the CBA clauses to cite, so
+repeating a question does not return identical text.
+
+Optionally, the **final answer** can be streamed from a small local LLM via
+[Ollama](https://ollama.com). It is off by default and falls back to the pool if
+Ollama is unreachable, so the demo never hard-fails:
+
+```bash
+ollama pull llama3.2:1b          # once
+USE_LLM=1 uvicorn src.main:app --reload --port 8001
+```
+
+Env: `USE_LLM` (default off), `OLLAMA_URL` (default `http://localhost:11434`),
+`OLLAMA_MODEL` (default `llama3.2:1b`). The `RUN_*`, `TOOL_CALL_*` and
+`STATE_DELTA` events stay deterministic regardless of the answer source.

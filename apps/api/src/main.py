@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from src import events
+from src import events, llm, responses
 from src.events import format_sse_event
 
 app = FastAPI(
@@ -70,33 +70,15 @@ def _last_user_message(messages: list[Message]) -> str:
     return "Hello"
 
 
-# A tiny in-memory "knowledge base" used by the mock search tool.
-_FAKE_CLAUSES: list[dict[str, str]] = [
-    {
-        "id": "cba-2024-art-12",
-        "union": "Local 100 - Transit Workers",
-        "section": "Article XII - Overtime Compensation",
-        "excerpt": (
-            "Overtime work performed in excess of forty (40) hours per week shall be "
-            "compensated at one and one-half (1.5) times the regular hourly rate."
-        ),
-    },
-    {
-        "id": "cba-2024-art-18",
-        "union": "Local 100 - Transit Workers",
-        "section": "Article XVIII - Holiday Pay",
-        "excerpt": (
-            "Employees required to work on a recognized holiday shall receive double "
-            "(2.0) their regular hourly rate for all hours worked on such holiday."
-        ),
-    },
-]
-
-
 async def _stream_run(payload: RunAgentInput) -> AsyncIterator[str]:
     thread_id = payload.threadId
     run_id = payload.runId
     user_text = _last_user_message(payload.messages)
+
+    # Route the message to a Labor-Relations intent; this picks the clauses to
+    # cite and a (randomly varied) intro/answer so repeats are not identical.
+    intent = responses.select_intent(user_text)
+    clauses = list(intent.clauses)
 
     yield format_sse_event(events.run_started(thread_id=thread_id, run_id=run_id))
 
@@ -113,8 +95,7 @@ async def _stream_run(payload: RunAgentInput) -> AsyncIterator[str]:
         events.text_message_start(thread_id=thread_id, run_id=run_id, message_id=message_id)
     )
 
-    intro = "Let me search the relevant CBA clauses for you..."
-    for chunk in _chunks(intro, size=6):
+    for chunk in _chunks(responses.pick_intro(intent), size=6):
         await asyncio.sleep(0.05)
         yield format_sse_event(
             events.text_message_content(
@@ -137,7 +118,7 @@ async def _stream_run(payload: RunAgentInput) -> AsyncIterator[str]:
         )
     )
 
-    args_json = json.dumps({"query": user_text, "topK": 2})
+    args_json = json.dumps({"query": user_text, "topK": len(clauses)})
     for chunk in _chunks(args_json, size=10):
         await asyncio.sleep(0.03)
         yield format_sse_event(
@@ -157,7 +138,7 @@ async def _stream_run(payload: RunAgentInput) -> AsyncIterator[str]:
             run_id=run_id,
             tool_call_id=tool_call_id,
             message_id=f"msg-{uuid.uuid4().hex[:8]}",
-            content={"results": _FAKE_CLAUSES},
+            content={"results": clauses},
         )
     )
 
@@ -165,7 +146,7 @@ async def _stream_run(payload: RunAgentInput) -> AsyncIterator[str]:
         events.state_delta(
             thread_id=thread_id,
             run_id=run_id,
-            patches=[{"op": "add", "path": "/citedClauses", "value": _FAKE_CLAUSES}],
+            patches=[{"op": "add", "path": "/citedClauses", "value": clauses}],
         )
     )
 
@@ -173,13 +154,7 @@ async def _stream_run(payload: RunAgentInput) -> AsyncIterator[str]:
     yield format_sse_event(
         events.text_message_start(thread_id=thread_id, run_id=run_id, message_id=final_message_id)
     )
-    final_answer = (
-        "Based on the current CBA for Local 100 (Transit Workers), overtime above 40 hours "
-        "per week is paid at 1.5x the regular rate, and holiday work is paid at 2.0x. "
-        "I've added both clauses to the context panel on the right."
-    )
-    for chunk in _chunks(final_answer, size=8):
-        await asyncio.sleep(0.04)
+    async for chunk in _final_answer_chunks(intent, user_text):
         yield format_sse_event(
             events.text_message_content(
                 thread_id=thread_id,
@@ -195,6 +170,24 @@ async def _stream_run(payload: RunAgentInput) -> AsyncIterator[str]:
     )
 
     yield format_sse_event(events.run_finished(thread_id=thread_id, run_id=run_id))
+
+
+async def _final_answer_chunks(
+    intent: responses.Intent, user_text: str
+) -> AsyncIterator[str]:
+    """Stream the final answer from Ollama when USE_LLM is on and reachable;
+    otherwise (or on any LLM error) fall back to the canned response pool."""
+    if await llm.ollama_available():
+        system, user = responses.build_llm_prompt(intent, user_text)
+        try:
+            async for token in llm.stream_chat(system, user):
+                yield token
+            return
+        except Exception:  # noqa: BLE001 - demo: never hard-fail, fall back to pool
+            pass
+    for chunk in _chunks(responses.pick_answer(intent), size=8):
+        await asyncio.sleep(0.04)
+        yield chunk
 
 
 def _chunks(text: str, *, size: int) -> list[str]:
