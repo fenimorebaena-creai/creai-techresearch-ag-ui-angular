@@ -41,7 +41,13 @@ export class AgentService {
   private agent = this.createAgent();
 
   private createAgent(): HttpAgent {
-    return new HttpAgent({ url: AGENT_URL, threadId: `t-${crypto.randomUUID()}` });
+    return new HttpAgent({
+      url: AGENT_URL,
+      threadId: `t-${crypto.randomUUID()}`,
+      // Bind fetch to the window so its `this` is correct (a bare/detached
+      // fetch reference throws "Illegal invocation", e.g. once Zone.js patches it).
+      fetch: (input, init) => window.fetch(input, init),
+    });
   }
 
   /** Mirror the streamed events into the UI signals. */

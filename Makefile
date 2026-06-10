@@ -1,4 +1,4 @@
-.PHONY: help install install-api install-web dev dev-api dev-web test lint clean
+.PHONY: help install install-api install-web dev dev-api dev-web test test-client lint clean
 
 help:
 	@echo "Targets:"
@@ -7,6 +7,7 @@ help:
 	@echo "  dev-api      - Run FastAPI agent on http://localhost:8001 (override with PORT=)"
 	@echo "  dev-web      - Run Angular client on http://localhost:4200"
 	@echo "  test         - Run API tests"
+	@echo "  test-client  - Run the @ag-ui/client integration check (needs dev-api up)"
 	@echo "  lint         - Run ruff + eslint"
 	@echo "  clean        - Remove caches and build artifacts"
 
@@ -30,6 +31,9 @@ dev-web:
 
 test:
 	cd apps/api && . .venv/bin/activate && pytest -q
+
+test-client:
+	cd apps/web && node spike-ag-ui-client.mjs
 
 lint:
 	cd apps/api && . .venv/bin/activate && ruff check src
