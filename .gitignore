@@ -51,3 +51,8 @@ Thumbs.db
 apps/web/dist/
 apps/web/.angular/
 apps/api/.venv/
+
+# Local scratch / E2E artifacts
+.playwright-mcp/
+e2e-demo-overtime.png
+google-chrome-stable_current_amd64.deb
