@@ -1,11 +1,6 @@
 import { Injectable, signal } from '@angular/core';
-import {
-  AgUiEvent,
-  ChatMessage,
-  JsonPatchOperation,
-  RunAgentInput,
-  ToolCall,
-} from './ag-ui.types';
+import { HttpAgent, type AgentSubscriber } from '@ag-ui/client';
+import { ChatMessage, ToolCall } from './ag-ui.types';
 
 // The mock agent runs on :8001 by default to avoid colliding with other local
 // FastAPI backends (e.g. creai_labor-relations on :8000). Keep this in sync with
@@ -13,17 +8,21 @@ import {
 const AGENT_URL = 'http://localhost:8001/agent';
 
 /**
- * Signal-based AG-UI client.
+ * AG-UI client backed by the first-party `@ag-ui/client` `HttpAgent`.
  *
- * Subscribes to a POST/SSE stream and reduces the standard AG-UI events into:
- *   - messages()   : array of chat messages (user + assistant streamed deltas)
+ * `HttpAgent` owns the POST + SSE transport, event-sequence verification and the
+ * shared-state reduction (RFC 6902 JSON-Patch via `fast-json-patch`). This
+ * service is the thin Angular glue: it mirrors the agent's reduced state and the
+ * streamed text/tool-call events into signals:
+ *   - messages()   : chat messages (user + assistant streamed deltas)
  *   - toolCalls()  : map of ToolCall keyed by toolCallId
- *   - agentState() : shared agent state (applied JSON-Patch deltas)
+ *   - agentState() : shared agent state (kept in sync from the client)
  *   - status()     : 'idle' | 'running' | 'error' | 'finished'
  *   - error()      : last error message
  *
- * We do not depend on EventSource because AG-UI uses POST + SSE; we use
- * fetch() + ReadableStream and parse the wire format manually.
+ * There is no first-party Angular client (CopilotKit ships React only and
+ * `@ag-ui/angular` does not exist), so this glue is the recommended pattern:
+ * official transport + a small custom signals layer.
  */
 @Injectable({ providedIn: 'root' })
 export class AgentService {
@@ -39,8 +38,79 @@ export class AgentService {
   readonly status = this._status.asReadonly();
   readonly error = this._error.asReadonly();
 
-  private abortController: AbortController | null = null;
-  private threadId = `t-${crypto.randomUUID()}`;
+  private agent = this.createAgent();
+
+  private createAgent(): HttpAgent {
+    return new HttpAgent({ url: AGENT_URL, threadId: `t-${crypto.randomUUID()}` });
+  }
+
+  /** Mirror the streamed events into the UI signals. */
+  private readonly subscriber: AgentSubscriber = {
+    onRunStartedEvent: () => {
+      this._status.set('running');
+    },
+    onRunFinishedEvent: () => {
+      this._status.set('finished');
+    },
+    onRunErrorEvent: ({ event }) => {
+      this._error.set(event.message);
+      this._status.set('error');
+    },
+    onTextMessageStartEvent: ({ event }) => {
+      this._messages.update((messages) => [
+        ...messages,
+        { id: event.messageId, role: 'assistant', content: '', pending: true },
+      ]);
+    },
+    onTextMessageContentEvent: ({ event }) => {
+      this._messages.update((messages) =>
+        messages.map((m) =>
+          m.id === event.messageId ? { ...m, content: m.content + event.delta } : m,
+        ),
+      );
+    },
+    onTextMessageEndEvent: ({ event }) => {
+      this._messages.update((messages) =>
+        messages.map((m) => (m.id === event.messageId ? { ...m, pending: false } : m)),
+      );
+    },
+    onToolCallStartEvent: ({ event }) => {
+      this._toolCalls.update((tools) => ({
+        ...tools,
+        [event.toolCallId]: {
+          id: event.toolCallId,
+          name: event.toolCallName,
+          args: '',
+          status: 'running',
+        },
+      }));
+    },
+    onToolCallArgsEvent: ({ event }) => {
+      this._toolCalls.update((tools) => {
+        const existing = tools[event.toolCallId];
+        if (!existing) return tools;
+        return { ...tools, [event.toolCallId]: { ...existing, args: existing.args + event.delta } };
+      });
+    },
+    onToolCallEndEvent: ({ event }) => {
+      this._toolCalls.update((tools) => {
+        const existing = tools[event.toolCallId];
+        if (!existing) return tools;
+        return { ...tools, [event.toolCallId]: { ...existing, status: 'finished' } };
+      });
+    },
+    onToolCallResultEvent: ({ event }) => {
+      this._toolCalls.update((tools) => {
+        const existing = tools[event.toolCallId];
+        if (!existing) return tools;
+        return { ...tools, [event.toolCallId]: { ...existing, status: 'completed', result: event.content } };
+      });
+    },
+    // The client applies STATE_DELTA (JSON-Patch) for us; just mirror the result.
+    onStateChanged: () => {
+      this._agentState.set({ ...(this.agent.state as Record<string, unknown>) });
+    },
+  };
 
   async sendMessage(text: string): Promise<void> {
     const userMessage: ChatMessage = {
@@ -52,46 +122,24 @@ export class AgentService {
     this._status.set('running');
     this._error.set(null);
 
-    const input: RunAgentInput = {
-      threadId: this.threadId,
-      runId: `r-${crypto.randomUUID()}`,
-      messages: this._messages().map((m) => ({ id: m.id, role: m.role, content: m.content })),
-      tools: [],
-      context: [],
-      state: this._agentState(),
-      forwardedProps: {},
-    };
-
-    this.abortController = new AbortController();
+    // Add to the agent so it is sent as conversation history in RunAgentInput.
+    this.agent.addMessages([{ id: userMessage.id, role: 'user', content: text }]);
 
     try {
-      const response = await fetch(AGENT_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'text/event-stream',
-        },
-        body: JSON.stringify(input),
-        signal: this.abortController.signal,
-      });
-      if (!response.ok || !response.body) {
-        throw new Error(`Agent returned HTTP ${response.status}`);
-      }
-      for await (const event of parseSseStream(response.body)) {
-        this.handleEvent(event);
-      }
+      await this.agent.runAgent({}, this.subscriber);
+      if (this._status() === 'running') this._status.set('finished');
     } catch (err) {
-      if ((err as Error).name === 'AbortError') {
+      if ((err as Error)?.name === 'AbortError') {
         this._status.set('idle');
         return;
       }
-      this._error.set((err as Error).message);
+      this._error.set((err as Error)?.message ?? 'Agent run failed');
       this._status.set('error');
     }
   }
 
   stop(): void {
-    this.abortController?.abort();
+    this.agent.abortRun();
   }
 
   reset(): void {
@@ -100,161 +148,6 @@ export class AgentService {
     this._agentState.set({});
     this._status.set('idle');
     this._error.set(null);
-    this.threadId = `t-${crypto.randomUUID()}`;
-  }
-
-  private handleEvent(event: AgUiEvent): void {
-    switch (event.type) {
-      case 'RUN_STARTED':
-        this._status.set('running');
-        break;
-      case 'RUN_FINISHED':
-        this._status.set('finished');
-        break;
-      case 'RUN_ERROR':
-        this._error.set(event.message);
-        this._status.set('error');
-        break;
-      case 'TEXT_MESSAGE_START':
-        this._messages.update((messages) => [
-          ...messages,
-          { id: event.messageId, role: event.role, content: '', pending: true },
-        ]);
-        break;
-      case 'TEXT_MESSAGE_CONTENT':
-        this._messages.update((messages) =>
-          messages.map((m) =>
-            m.id === event.messageId ? { ...m, content: m.content + event.delta } : m,
-          ),
-        );
-        break;
-      case 'TEXT_MESSAGE_END':
-        this._messages.update((messages) =>
-          messages.map((m) => (m.id === event.messageId ? { ...m, pending: false } : m)),
-        );
-        break;
-      case 'TOOL_CALL_START':
-        this._toolCalls.update((tools) => ({
-          ...tools,
-          [event.toolCallId]: {
-            id: event.toolCallId,
-            name: event.toolCallName,
-            args: '',
-            status: 'running',
-          },
-        }));
-        break;
-      case 'TOOL_CALL_ARGS':
-        this._toolCalls.update((tools) => {
-          const existing = tools[event.toolCallId];
-          if (!existing) return tools;
-          return {
-            ...tools,
-            [event.toolCallId]: { ...existing, args: existing.args + event.delta },
-          };
-        });
-        break;
-      case 'TOOL_CALL_END':
-        this._toolCalls.update((tools) => {
-          const existing = tools[event.toolCallId];
-          if (!existing) return tools;
-          return {
-            ...tools,
-            [event.toolCallId]: { ...existing, status: 'finished' },
-          };
-        });
-        break;
-      case 'TOOL_CALL_RESULT':
-        this._toolCalls.update((tools) => {
-          const existing = tools[event.toolCallId];
-          if (!existing) return tools;
-          return {
-            ...tools,
-            [event.toolCallId]: { ...existing, status: 'completed', result: event.content },
-          };
-        });
-        break;
-      case 'STATE_SNAPSHOT':
-        this._agentState.set({ ...event.snapshot });
-        break;
-      case 'STATE_DELTA':
-        this._agentState.update((state) => applyJsonPatch(state, event.delta));
-        break;
-    }
-  }
-}
-
-/**
- * Apply a minimal subset of RFC 6902 JSON-Patch operations.
- *
- * The demo only emits `add` and `replace` operations on top-level paths
- * (`/lastUserMessage`, `/citedClauses`) so a tiny implementation suffices.
- * Production code should use a real JSON-Patch library.
- */
-function applyJsonPatch(
-  state: Record<string, unknown>,
-  patches: JsonPatchOperation[],
-): Record<string, unknown> {
-  const next = { ...state };
-  for (const patch of patches) {
-    const key = patch.path.replace(/^\//, '');
-    if (patch.op === 'add' || patch.op === 'replace') {
-      next[key] = patch.value;
-    } else if (patch.op === 'remove') {
-      delete next[key];
-    }
-  }
-  return next;
-}
-
-/**
- * Parse an SSE byte stream into a sequence of typed AG-UI events.
- *
- * Each SSE frame is delimited by a blank line. Within a frame we honour:
- *   - `event: <name>` lines for the event type
- *   - `data: <json>` lines for the JSON payload (concatenated if multiple)
- *
- * Lines starting with `:` are comments and skipped.
- */
-async function* parseSseStream(body: ReadableStream<Uint8Array>): AsyncGenerator<AgUiEvent> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      if (buffer.trim()) yield* drainFrame(buffer);
-      return;
-    }
-    buffer += decoder.decode(value, { stream: true });
-
-    let frameEnd: number;
-    while ((frameEnd = buffer.indexOf('\n\n')) !== -1) {
-      const frame = buffer.slice(0, frameEnd);
-      buffer = buffer.slice(frameEnd + 2);
-      yield* drainFrame(frame);
-    }
-  }
-}
-
-function* drainFrame(frame: string): Generator<AgUiEvent> {
-  const lines = frame.split('\n');
-  let eventName: string | null = null;
-  let dataBuffer = '';
-  for (const line of lines) {
-    if (!line || line.startsWith(':')) continue;
-    if (line.startsWith('event: ')) {
-      eventName = line.slice(7).trim();
-    } else if (line.startsWith('data: ')) {
-      dataBuffer += line.slice(6);
-    }
-  }
-  if (!eventName || !dataBuffer) return;
-  try {
-    const parsed = JSON.parse(dataBuffer) as AgUiEvent;
-    yield parsed;
-  } catch (err) {
-    console.warn('AG-UI: failed to parse event payload', { eventName, dataBuffer, err });
+    this.agent = this.createAgent();
   }
 }

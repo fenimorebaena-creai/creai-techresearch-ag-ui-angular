@@ -63,12 +63,35 @@ events while orchestrating the existing gRPC clients.
   loops. Existing CRUD screens (Reference Data, MOA amendments) should keep
   using regular REST and the in-tree WS for list refreshes.
 
+## Client choice — spike result (2026-06-10)
+
+**There is no first-party Angular client.** `@copilotkit/angular` and
+`@ag-ui/angular` do not exist on npm (404); CopilotKit ships React-only packages
+(`@copilotkit/react-core`, peer-deps `react ^18 || ^19`). The earlier assumption
+of "a CopilotKit Angular client on Signals + Streaming Resource API" was wrong.
+
+What *does* exist is the framework-agnostic **`@ag-ui/client`** (v0.0.56). Its
+`HttpAgent` owns the POST + SSE transport, event-sequence verification
+(`verifyEvents`) and shared-state reduction via **`fast-json-patch`**. A spike
+pointed it at this repo's FastAPI mock and it reconstructed messages, the
+`search_cba_clause` tool call and `state.citedClauses` (JSON-Patch) correctly
+with no backend changes (see `apps/web/spike-ag-ui-client.mjs`).
+
+**Decision:** the demo now uses `HttpAgent` as the transport; the Angular layer
+is a thin signals glue in `AgentService` (mirroring the client's reduced state
+and the streamed text/tool-call events). This deletes the previous ~250-line
+hand-rolled SSE parser + JSON-Patch reducer. For a real Vensure integration the
+same shape applies: official transport + a small custom signals layer.
+
 ## Risks and unknowns
 
-- The official `@copilotkit/angular` client is recent; minor version churn is
-  likely through 2026. Adopting now means tracking releases and possibly
-  pinning until stable. The fallback (custom `AgentService` as in this repo) is
-  ~250 lines and acceptable as an escape hatch.
+- `@ag-ui/client` is **v0.0.56** (pre-1.0): API churn is likely through 2026, so
+  pin the exact version and budget for upgrades. The hand-rolled `AgentService`
+  (preserved in git history) remains a viable escape hatch if the SDK stalls.
+- Adopting the SDK grows the web bundle from ~200 kB to ~450 kB raw (~95 kB
+  transferred) — it pulls in `rxjs`, `fast-json-patch`, `zod` and `uuid`. For an
+  already-Angular MF most of this (rxjs) is shared, so the marginal cost is
+  smaller in `creai_labor-relations-front`.
 - The `Resource` / `streamingResource` APIs in Angular 20 are still
   `@experimental` (June 2025 release notes); we should be ready for breaking
   changes in 20.1 / 20.2.
