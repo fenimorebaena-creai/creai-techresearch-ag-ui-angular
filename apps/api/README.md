@@ -30,16 +30,16 @@ about Collective Bargaining Agreements (CBAs).
 
 ```bash
 cd apps/api
-python -m venv .venv
+python3 -m venv .venv
 . .venv/bin/activate
 pip install -e ".[dev]"
-uvicorn src.main:app --reload --port 8000
+uvicorn src.main:app --reload --port 8001
 ```
 
 Verify with a curl smoke test:
 
 ```bash
-curl -N -X POST http://localhost:8000/agent \
+curl -N -X POST http://localhost:8001/agent \
   -H 'Content-Type: application/json' \
   -H 'Accept: text/event-stream' \
   -d '{"threadId":"t1","runId":"r1","messages":[{"id":"m1","role":"user","content":"Hello"}],"tools":[],"context":[],"state":{},"forwardedProps":{}}'

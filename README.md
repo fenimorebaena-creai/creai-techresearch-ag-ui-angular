@@ -52,7 +52,7 @@ cd creai-techresearch-ag-ui-angular
 make install      # creates apps/api/.venv and runs npm install in apps/web
 
 # In two terminals:
-make dev-api      # → FastAPI on http://localhost:8000
+make dev-api      # → FastAPI on http://localhost:8001 (override with PORT=)
 make dev-web      # → Angular  on http://localhost:4200
 ```
 

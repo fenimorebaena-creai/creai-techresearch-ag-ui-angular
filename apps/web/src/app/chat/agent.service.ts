@@ -7,7 +7,10 @@ import {
   ToolCall,
 } from './ag-ui.types';
 
-const AGENT_URL = 'http://localhost:8000/agent';
+// The mock agent runs on :8001 by default to avoid colliding with other local
+// FastAPI backends (e.g. creai_labor-relations on :8000). Keep this in sync with
+// the PORT used by `make dev-api` / scripts/dev.sh.
+const AGENT_URL = 'http://localhost:8001/agent';
 
 /**
  * Signal-based AG-UI client.

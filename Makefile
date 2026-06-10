@@ -4,7 +4,7 @@ help:
 	@echo "Targets:"
 	@echo "  install      - Install API and web dependencies"
 	@echo "  dev          - Run API and web concurrently (use two terminals)"
-	@echo "  dev-api      - Run FastAPI agent on http://localhost:8000"
+	@echo "  dev-api      - Run FastAPI agent on http://localhost:8001 (override with PORT=)"
 	@echo "  dev-web      - Run Angular client on http://localhost:4200"
 	@echo "  test         - Run API tests"
 	@echo "  lint         - Run ruff + eslint"
@@ -13,7 +13,7 @@ help:
 install: install-api install-web
 
 install-api:
-	cd apps/api && python -m venv .venv && . .venv/bin/activate && pip install -e .
+	cd apps/api && python3 -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
 
 install-web:
 	cd apps/web && npm install
@@ -23,7 +23,7 @@ dev:
 	@echo "Or use ./scripts/dev.sh to run both."
 
 dev-api:
-	cd apps/api && . .venv/bin/activate && uvicorn src.main:app --reload --port 8000
+	cd apps/api && . .venv/bin/activate && uvicorn src.main:app --reload --port $${PORT:-8001}
 
 dev-web:
 	cd apps/web && npm start
