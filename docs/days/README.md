@@ -1,5 +1,12 @@
 # Daily execution plans
 
+> ⚠️ **Superseded (2026-06-10).** These 22 per-day files describe the original
+> 30-day calendar (starting 2026-05-25) and no longer reflect reality. The
+> authoritative plan is now [`docs/sprint-7-sessions.md`](../sprint-7-sessions.md):
+> 7 one-hour sessions (Tue–Fri) to a demo on 2026-06-22. Keep these files only
+> as a reference for the per-day task breakdown; follow the 7-session plan for
+> execution.
+
 One markdown per working day of the 30-day research sprint for
 [TR-306](https://creai.atlassian.net/browse/TR-306). Each file is **self-contained**
 so an LLM or agent picking up on day N does not need to re-read the previous N-1
