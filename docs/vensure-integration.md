@@ -1,20 +1,67 @@
 # Vensure integration analysis
 
 How would AG-UI fit into the Vensure Labor Relations product, and how does it
-compare to the WebSocket pattern that `creai_labor-relations` already uses for
-upload and structure-extraction jobs?
+compare to the transport the **Labor Relations Chat** uses *today*?
+
+> **Baseline correction (2026-06-12).** An earlier draft of this document
+> compared AG-UI against the WebSocket endpoint `/api/v1/ws`. That was the wrong
+> baseline: `/api/v1/ws` carries **document upload / structure-extraction job
+> updates**, not the chat. The chat that shipped in **VN-54** (Cursor plan
+> `chat_integration_backend-frontend`) is a **synchronous REST request/response
+> backed by gRPC** — no streaming, no WebSocket. The comparison below is now
+> against that real baseline, which is what makes AG-UI's token streaming,
+> visible tool calls and incremental `STATE_DELTA` compelling.
+
+## The real chat baseline today (VN-54)
+
+The chat in `creai_labor-relations-front` calls a single blocking endpoint and
+waits for the whole answer:
+
+```
+ChatPageComponent
+  └─ ConversationsService.sendMessage(id, content)
+       └─ POST /api/v1/conversations/{id}/messages        (FastAPI, synchronous)
+            ├─ gRPC NaturalLanguageToQuery(query_text)     ai-entities-extraction :50052  → QueryRepresentation
+            └─ gRPC AnswerGeneration(query_representation)  ai-graph-relations      :50053  → { answer, query (Cypher), failure_mode }
+       ◀── SendMessageResponse  { user_message, assistant_message, artifacts[] }   (one shot, at the end)
+```
+
+Key properties of the baseline:
+
+- **One request, one response.** The browser issues `POST .../messages` and
+  blocks until the orchestrator has finished both gRPC round-trips. There is no
+  intermediate output — the user sees a spinner, then the full answer appears at
+  once. The previous mock used `setTimeout` + a sample Q&A bank; VN-54 replaced
+  it with exactly one synchronous `sendMessage`.
+- **Artifacts arrive bundled at the end.** The response carries
+  `MessageArtifactDto[]` with two kinds:
+  `graph.query_interpretation` (how the question was parsed into a query intent)
+  and `graph.answer_synthesis` (`{ query, answer, failure_mode }`). These are
+  *exactly* the intermediate steps AG-UI would surface live as tool calls /
+  state, but today they are only visible after everything completes.
+- **Evidence panel is a placeholder.** `artifactToEvidence()` returns `[]`
+  unless `kind === 'graph.answer_synthesis'`, because the Answer Generation proto
+  does not yet expose structured evidence (open TODO — see below).
+- **Onboarding context** (`union`, `local`, `state`, `role`, `topic`,
+  `effectiveDate`) is POSTed once at `create()` time and stored on the
+  conversation; it is not re-streamed or updated as the agent works.
+- **Feedback** is a separate `POST /conversations/{id}/feedback` keyed by the
+  assistant `message_id`.
 
 ## Where AG-UI would land
 
-In `creai_labor-relations-front` (Angular 20 microfrontend), the **Chat tab** is
-currently mocked. The future *Labor Relations Assistant* would need to:
+In `creai_labor-relations-front` (Angular 20 microfrontend), the *Labor
+Relations Assistant* chat would benefit from:
 
-- Stream the assistant's tokens as they are produced
-- Surface tool calls (retrieval, graph queries) with intermediate progress
-- Update a context side-panel with cited CBAs, MOAs, and clauses as the agent
-  works
-- Optionally support human-in-the-loop confirmations (e.g. *"Do you want me to
-  consolidate this MOA into the CBA?"*)
+- Streaming the assistant's tokens as they are produced, instead of one blocking
+  wait for the full `assistant_message`.
+- Surfacing the two gRPC steps (`graph.query_interpretation`,
+  `graph.answer_synthesis`) as **live tool calls** with running → completed
+  status, instead of bundling them into the final response.
+- Updating a context side-panel (cited CBAs, MOAs, clauses) **incrementally** as
+  evidence is found, instead of a one-shot `artifacts[]` payload.
+- Optionally supporting human-in-the-loop confirmations (e.g. *"Do you want me to
+  consolidate this MOA into the CBA?"*).
 
 These are exactly the affordances AG-UI standardises.
 
@@ -22,46 +69,68 @@ On the backend, the natural integration point is **`creai_labor-relations`**
 (the FastAPI orchestrator). It already owns:
 
 - Auth (`PyJWT`), per-request actor context
-- WebSocket endpoint at `/api/v1/ws` for upload/structure events
-- gRPC clients to the three `ai-*` services (structure, entities, graph)
+- The `conversations` module and its two gRPC clients
+  (`GrpcQueryInterpretationAdapter` → :50052, `GrpcAnswerSynthesisAdapter` →
+  :50053)
 
-A real AG-UI endpoint would live in a new module
-(`app/modules/assistant/api/`), POST `/api/v1/assistant/agent`, and emit
-events while orchestrating the existing gRPC clients.
+An AG-UI endpoint would live alongside the existing module
+(e.g. `POST /api/v1/conversations/{id}/messages/stream`, or a new
+`/api/v1/assistant/agent`) and **emit events while orchestrating the same gRPC
+clients** — the pipeline does not change, only the wire format does.
 
-## AG-UI vs the current WebSocket pattern
+## AG-UI vs the current REST + gRPC chat
 
-| Concern                        | AG-UI (HTTP + SSE)                                                                                                          | Current WebSocket pattern in Vensure                                                                                                                 |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Transport**                  | HTTP/1.1 or HTTP/2 + Server-Sent Events. Unidirectional server→client after the initial POST.                                | WebSocket. Bidirectional, but in practice used mostly server→client for job updates.                                                                  |
-| **Auth**                       | Standard HTTP headers (`Authorization: Bearer`, cookies). Plugs into existing JWT middleware without changes.                | Not implemented (`docs/backend/08-open-questions.md`); WebSocket endpoint is currently unauthenticated. Auth would require sub-protocol or token-in-URL workaround. |
-| **Reconnect / catch-up**       | Native `Last-Event-ID` header + numeric event IDs. Server can replay missed events on reconnect with minimal code.            | None; reconnection client-side starts a new stream. Catch-up of missed events would require new server-side machinery.                                |
-| **Event typing**               | ~16 standardised event types. Off-the-shelf TS types from CopilotKit. Easy to adopt new event types later.                   | Ad-hoc JSON shapes per feature. No central catalogue, no shared TS types between front and back.                                                      |
-| **Multi-replica scale-out**    | Each POST is a fresh HTTP request → stateless from the LB perspective. Compatible with horizontally scaled FastAPI replicas. | `ConnectionManager` is in-process; multiple replicas of `creai_labor-relations` cannot fan out updates without Redis Pub/Sub or similar.              |
-| **Polyglot ecosystem**         | First-party SDKs in Python, JS, Go. Clients in React, Angular (CopilotKit), Vue, Svelte; community React Native.             | Bespoke; would need to be rebuilt or wrapped for any new client.                                                                                       |
-| **Streaming primitives**       | Tokens (`TEXT_MESSAGE_CONTENT`), tool calls (`TOOL_CALL_*`), state diffs (`STATE_DELTA`), interrupts. All standardised.       | Currently scoped to "list updated" / "amendment updated" payloads for the documents module. Would need new event taxonomy for chat.                  |
-| **Generative UI**              | Supported via AG-UI's tool-call → component-render pattern (CopilotKit registers client tools that the agent invokes).        | Not supported today; would require greenfield design.                                                                                                  |
-| **Browser API**                | `fetch()` + `ReadableStream`. Works behind corporate proxies that block WS. No special infra.                                | `WebSocket` API. Sometimes blocked by aggressive proxies; ALB / Azure App Gateway requires explicit upgrade handling.                                  |
-| **Operational cost**           | Long-lived connections, but each is just an HTTP/1.1 stream. Easy to terminate behind any standard ingress.                  | Long-lived TCP; some load balancers count WebSocket idle differently. K8s health probes must avoid killing live streams.                              |
-| **Debuggability**              | Visible in DevTools → Network → EventStream tab. `curl -N` produces human-readable output.                                   | Visible in DevTools → Network → WS tab. Frames are JSON but no event-name in the wire format unless added manually.                                   |
+| Concern                       | AG-UI (HTTP POST + SSE stream)                                                                                              | Current chat today (synchronous REST + gRPC, VN-54)                                                                          |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| **Response delivery**         | Tokens stream as produced (`TEXT_MESSAGE_CONTENT`); first token in ms, perceived latency low.                               | Single blocking `POST .../messages`; the user waits for both gRPC round-trips, then the full `assistant_message` appears.     |
+| **Intermediate steps**        | The two gRPC stages surface live as `TOOL_CALL_*` (running → result), so the user sees "interpreting query…", "searching…". | `graph.query_interpretation` + `graph.answer_synthesis` are bundled into the final `artifacts[]`; no live progress.           |
+| **Context / evidence panel**  | Cited clauses stream in via `STATE_DELTA` (JSON-Patch) as evidence is found.                                                | `artifacts[]` delivered once at the end; evidence panel is currently a placeholder (`[]` until the proto exposes evidence).   |
+| **Perceived performance**     | Streaming masks multi-second LLM + graph latency; UI feels responsive.                                                      | Full latency is a dead spinner; long graph/LLM calls feel like a hang.                                                       |
+| **Cancellation**              | Native — client aborts the `fetch`/SSE stream; server stops emitting. Visible "Stop" in the demo.                           | No cancel; the request runs to completion server-side regardless of the user.                                                |
+| **Human-in-the-loop**         | First-class via interrupt events (agent pauses, asks, resumes).                                                             | Not possible in a single request/response; would need a new endpoint + state machine.                                        |
+| **Event typing**              | ~16 standardised event types with off-the-shelf TS types (`@ag-ui/core`).                                                   | Typed DTOs (`SendMessageResponse`, `MessageArtifactDto`) but no event taxonomy — there are no intermediate events to type.    |
+| **Auth**                      | Standard HTTP headers (`Authorization: Bearer`). Plugs into the existing JWT middleware unchanged.                          | Same — already JWT-protected REST. (Open TODO: real `X-Tenant-Id`/`X-User-Id` from the JWT; today falls back to dev defaults.)|
+| **Reconnect / catch-up**      | Native `Last-Event-ID` + numeric event IDs; server can replay missed tokens.                                               | N/A — a dropped request is just retried from scratch; no partial state to recover.                                           |
+| **Multi-replica scale-out**   | Each POST is a fresh stateless HTTP request → fine behind horizontally scaled FastAPI replicas.                            | Already stateless request/response → also scales fine. (No regression here — this is *not* a reason to adopt AG-UI.)         |
+| **Browser API**               | `fetch()` + `ReadableStream`. Works behind corporate proxies that block WS; but **SSE buffering must be off** at the proxy. | Plain `HttpClient` request/response. Maximally proxy-friendly; nothing to validate.                                          |
+| **Debuggability**             | DevTools → Network → EventStream; `curl -N` is human-readable.                                                             | DevTools → Network → one request with a JSON body. Simplest possible to inspect.                                             |
+| **Implementation cost**       | New streaming endpoint + event emitter + client transport; AG-UI standardises the contract but the pipeline is rebuilt.    | Already shipped. Adopting AG-UI is net-new work justified by UX, not by fixing a broken baseline.                            |
+
+**Bottom line:** the current chat is *correct and simple* but *opaque and
+blocking*. AG-UI's value here is **experience** — streaming text, visible tool
+progress, incremental evidence, cancellation and HITL — not fixing a
+transport defect. The honest framing for stakeholders is "AG-UI upgrades a
+working synchronous chat into a streaming agentic one," not "AG-UI replaces a
+broken WebSocket."
+
+## A note on the WebSocket pattern (`/api/v1/ws`)
+
+`creai_labor-relations` does expose a WebSocket at `/api/v1/ws`, but it carries
+**document upload / structure-extraction job updates** ("list updated",
+"amendment updated"), not chat. It is a separate concern with its own
+trade-offs (in-process `ConnectionManager`, no auth on the endpoint, no
+multi-replica fan-out without Redis Pub/Sub). It is **not** the chat baseline and
+is out of scope for the chat-transport decision. If it ever needs streaming
+fan-out at scale that is its own ticket; it could keep its current contract or be
+migrated to AG-UI separately.
 
 ## What AG-UI does *not* solve
 
-- **Auth.** AG-UI relies on HTTP headers; you still need to wire JWT validation
-  on the new `/api/v1/assistant/agent` endpoint and propagate the actor context
-  to the agent orchestrator. The WebSocket auth gap on `/api/v1/ws` is
-  unaffected and remains its own ticket.
-- **Multi-replica fan-out for the *existing* document WS.** The
-  upload/structure WS pattern would either keep its current shape (and add
-  Redis-backed `ConnectionManager`) or be migrated separately to AG-UI.
-- **Backend agent orchestration.** AG-UI is purely the wire format; the actual
-  retrieval + graph + LLM pipeline still has to be built on top of the existing
-  gRPC services. CopilotKit ships first-party adapters for LangGraph, CrewAI
-  and Mastra that emit AG-UI natively; rolling our own emitter (as in this
-  research repo) is also straightforward.
-- **Reactive forms / non-chat UIs.** AG-UI is optimised for agent ↔ user
-  loops. Existing CRUD screens (Reference Data, MOA amendments) should keep
-  using regular REST and the in-tree WS for list refreshes.
+- **The backend agent pipeline.** AG-UI is purely the wire format; the
+  NL2Q → Answer Generation gRPC pipeline (and any future retrieval/LLM steps)
+  still has to be orchestrated. AG-UI just standardises how its progress reaches
+  the browser. CopilotKit ships first-party adapters for LangGraph, CrewAI and
+  Mastra that emit AG-UI natively; rolling our own emitter over the existing gRPC
+  clients (as in this research repo) is also straightforward.
+- **Structured evidence.** The evidence panel stays empty until the Answer
+  Generation proto exposes structured evidence (open VN-54 TODO). AG-UI would
+  *stream* whatever evidence exists, but it cannot invent evidence the proto does
+  not return.
+- **Auth/tenancy hardening.** The `X-Tenant-Id` / `X-User-Id`-from-JWT TODO and
+  the dev-default fallback are unchanged by the transport choice.
+- **Reactive forms / non-chat UIs.** AG-UI is optimised for agent ↔ user loops.
+  Existing CRUD screens (Reference Data, MOA amendments) and the document-job WS
+  should keep their current contracts.
 
 ## Client choice — spike result (2026-06-10)
 
@@ -95,35 +164,42 @@ same shape applies: official transport + a small custom signals layer.
 - The `Resource` / `streamingResource` APIs in Angular 20 are still
   `@experimental` (June 2025 release notes); we should be ready for breaking
   changes in 20.1 / 20.2.
-- SSE behind PrismHR / PrismOne's existing ALBs / WAFs is **not yet
-  validated** — buffer settings such as `proxy_buffering` in nginx or the
-  equivalent in Azure App Gateway can break SSE streaming. Needs a dedicated
-  spike in staging before adoption.
+- **SSE behind PrismHR / PrismOne's existing ALBs / WAFs is not yet validated.**
+  Buffer settings such as `proxy_buffering` in nginx or the equivalent in Azure
+  App Gateway can break SSE streaming. This is the **hard blocker** to clear
+  before adoption — the current synchronous REST chat does not have this risk,
+  so it is a cost AG-UI introduces.
 - JSON-Patch (`STATE_DELTA`) requires a battle-tested library on the client; do
   not ship the minimal patcher in this demo to production.
 
 ## Recommendation
 
-**Investigate further with a small, time-boxed integration spike.**
+**Investigate further with a small, time-boxed integration spike** — AG-UI is a
+UX upgrade to a working chat, so the decision hinges on the streaming
+infrastructure validating in staging, not on fixing a defect.
 
 Concretely, before committing to AG-UI as the chat transport in
 `creai_labor-relations-front`:
 
-1. Stand up a `/api/v1/assistant/agent` SSE endpoint in `creai_labor-relations`
-   protected by the existing JWT middleware. Emit a hard-coded "Hello world"
-   stream that exercises `TEXT_MESSAGE_*` + `TOOL_CALL_*` + `STATE_DELTA`.
-2. Deploy behind the staging ingress (Azure App Gateway / nginx) and confirm
-   SSE buffering is disabled. **Hard blocker if not** — pick a different
-   transport.
-3. Add the Angular client into the real MF behind a feature flag, consuming
-   from the staging endpoint. Verify B2C auth headers, MSAL token refresh, and
-   single-spa lifecycle interplay.
+1. Stand up a streaming variant of the message endpoint in `creai_labor-relations`
+   (e.g. `POST /api/v1/conversations/{id}/messages/stream`) protected by the
+   existing JWT middleware. Emit `TEXT_MESSAGE_*` for the answer,
+   `TOOL_CALL_*` for the NL2Q + Answer Generation stages, and `STATE_DELTA` for
+   evidence — orchestrating the **same** gRPC clients the synchronous endpoint
+   already uses.
+2. Deploy behind the staging ingress (Azure App Gateway / nginx) and confirm SSE
+   buffering is disabled. **Hard blocker if not** — keep the synchronous REST
+   chat and pick a different transport.
+3. Add the Angular client into the real MF behind a feature flag, consuming from
+   the staging endpoint. Verify B2C auth headers, MSAL token refresh, and
+   single-spa lifecycle interplay. Keep the synchronous `sendMessage` path as the
+   fallback.
 4. Decide adopt / park based on the spike outcome.
 
 Estimated effort for the spike: 1 sprint, 1 FE + 1 BE.
 
-If the spike succeeds, AG-UI replaces the need to invent a chat-specific
-WebSocket taxonomy and gives us a free upgrade path to generative UI and
-human-in-the-loop interrupts. The existing document-job WebSocket can keep its
-current contract or be migrated in a separate ticket once it gains Redis-backed
-multi-replica support.
+If the spike succeeds, AG-UI turns the existing blocking chat into a streaming,
+tool-aware, interruptible one and gives a free upgrade path to generative UI and
+human-in-the-loop. If SSE cannot pass the staging ingress, the synchronous REST
+chat stays as-is and we revisit later. The document-job WebSocket is unaffected
+either way.

@@ -1,5 +1,12 @@
 # AG-UI Protocol + Angular 20 cliente para el Chat de Vensure
 
+> **Obsoleto — referencia histórica.** El plan vigente es
+> `docs/sprint-7-sessions.md` (sprint comprimido de 7 sesiones hacia el demo del
+> 2026-06-22). Además, la comparación "AG-UI vs el WebSocket actual" mencionada
+> abajo usa un baseline equivocado: el chat real hoy es **REST síncrono + gRPC**
+> (VN-54), no WebSocket — `/api/v1/ws` es para jobs de documentos. El análisis
+> corregido vive en `docs/vensure-integration.md`.
+>
 > Plan original de investigación. Generado en sesión de planeación y movido al
 > repositorio como referencia. La sesión 1 completó: ticket Jira en TR, repo
 > en GitHub y scaffold local de `apps/api` (FastAPI) y `apps/web` (Angular 20).
