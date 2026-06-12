@@ -1,4 +1,4 @@
-.PHONY: help install install-api install-web dev dev-api dev-web test test-client lint clean
+.PHONY: help install install-api install-web dev dev-api dev-web test test-client record-demo lint clean
 
 help:
 	@echo "Targets:"
@@ -8,6 +8,7 @@ help:
 	@echo "  dev-web      - Run Angular client on http://localhost:4200"
 	@echo "  test         - Run API tests"
 	@echo "  test-client  - Run the @ag-ui/client integration check (needs dev-api up)"
+	@echo "  record-demo  - Record the screencast backup (needs api+web up; see docs/demo-runbook.md)"
 	@echo "  lint         - Run ruff + eslint"
 	@echo "  clean        - Remove caches and build artifacts"
 
@@ -34,6 +35,9 @@ test:
 
 test-client:
 	cd apps/web && node spike-ag-ui-client.mjs
+
+record-demo:
+	PLAYWRIGHT_BROWSERS_PATH="$${PLAYWRIGHT_BROWSERS_PATH:-$$HOME/.cache/ms-playwright}" node scripts/record-demo.mjs
 
 lint:
 	cd apps/api && . .venv/bin/activate && ruff check src

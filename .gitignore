@@ -56,3 +56,6 @@ apps/api/.venv/
 .playwright-mcp/
 /*.png
 google-chrome-stable_current_amd64.deb
+
+# Screencast recordings — generated on demand via `make record-demo`, not committed
+docs/media/
