@@ -8,9 +8,11 @@ between AG-UI Protocol events and the Angular signal-based state.
 ```mermaid
 flowchart LR
     subgraph Browser
-        UI[ChatComponent<br/>OnPush + signals]
-        Service[AgentService<br/>SSE parser + reducer]
+        UI[ChatComponent<br/>zoneless + signals]
+        Service[AgentService<br/>signals glue + AgentSubscriber]
+        Http[HttpAgent<br/>&#64;ag-ui/client]
         UI -->|reads signals| Service
+        Service -->|subscribes| Http
     end
     subgraph Server
         FastAPI[FastAPI<br/>POST /agent]
@@ -18,9 +20,14 @@ flowchart LR
         FastAPI --> Events
     end
     UI -->|sendMessage| Service
-    Service -->|fetch POST<br/>Accept text/event-stream| FastAPI
-    FastAPI -->|StreamingResponse<br/>SSE frames| Service
+    Http -->|fetch POST<br/>Accept text/event-stream| FastAPI
+    FastAPI -->|StreamingResponse<br/>SSE frames| Http
 ```
+
+The transport, SSE parsing, event-sequence verification (`verifyEvents`) and
+shared-state reduction live in `@ag-ui/client`'s `HttpAgent`. `AgentService` is a
+thin layer that registers an `AgentSubscriber` and mirrors the agent's streamed
+events and reduced state into Angular signals.
 
 ## Request/response sequence
 
@@ -52,44 +59,50 @@ sequenceDiagram
 
 ## Event-to-signal reducer
 
-The `AgentService` consumes the SSE byte stream, parses each frame, and reduces
-each AG-UI event into the following signals:
+`AgentService` registers an `AgentSubscriber` on the `HttpAgent` and maps each
+streamed event (and the agent's reduced state) into the following signals. The
+handler column names the `AgentSubscriber` callback that performs the update:
 
-| AG-UI event              | Signal updated                | Effect                                                |
-| ------------------------ | ----------------------------- | ----------------------------------------------------- |
-| `RUN_STARTED`            | `status`                      | set to `'running'`                                    |
-| `RUN_FINISHED`           | `status`                      | set to `'finished'`                                   |
-| `RUN_ERROR`              | `status`, `error`             | `'error'` + error message                             |
-| `TEXT_MESSAGE_START`     | `messages`                    | append new message with empty content, `pending=true` |
-| `TEXT_MESSAGE_CONTENT`   | `messages`                    | concatenate `delta` to the matching message           |
-| `TEXT_MESSAGE_END`       | `messages`                    | mark matching message as `pending=false`              |
-| `TOOL_CALL_START`        | `toolCalls`                   | insert new ToolCall with `status='running'`           |
-| `TOOL_CALL_ARGS`         | `toolCalls`                   | concatenate args delta to the matching ToolCall       |
-| `TOOL_CALL_END`          | `toolCalls`                   | set `status='finished'`                               |
-| `TOOL_CALL_RESULT`       | `toolCalls`                   | set `status='completed'` + populate `result`          |
-| `STATE_SNAPSHOT`         | `agentState`                  | replace entire object                                 |
-| `STATE_DELTA`            | `agentState`                  | apply JSON-Patch operations                           |
+| AG-UI event              | Subscriber callback          | Signal updated    | Effect                                                |
+| ------------------------ | ---------------------------- | ----------------- | ----------------------------------------------------- |
+| `RUN_STARTED`            | `onRunStartedEvent`          | `status`          | set to `'running'`                                    |
+| `RUN_FINISHED`           | `onRunFinishedEvent`         | `status`          | set to `'finished'`                                   |
+| `RUN_ERROR`              | `onRunErrorEvent`            | `status`, `error` | `'error'` + error message                             |
+| `TEXT_MESSAGE_START`     | `onTextMessageStartEvent`    | `messages`        | append new message with empty content, `pending=true` |
+| `TEXT_MESSAGE_CONTENT`   | `onTextMessageContentEvent`  | `messages`        | concatenate `delta` to the matching message           |
+| `TEXT_MESSAGE_END`       | `onTextMessageEndEvent`      | `messages`        | mark matching message as `pending=false`              |
+| `TOOL_CALL_START`        | `onToolCallStartEvent`       | `toolCalls`       | insert new ToolCall with `status='running'`           |
+| `TOOL_CALL_ARGS`         | `onToolCallArgsEvent`        | `toolCalls`       | concatenate args delta to the matching ToolCall       |
+| `TOOL_CALL_END`          | `onToolCallEndEvent`         | `toolCalls`       | set `status='finished'`                               |
+| `TOOL_CALL_RESULT`       | `onToolCallResultEvent`      | `toolCalls`       | set `status='completed'` + populate `result`          |
+| `STATE_SNAPSHOT` / `STATE_DELTA` | `onStateChanged`     | `agentState`      | mirror the agent's already-reduced `state` object     |
 
-## Why we do not use `EventSource`
+Note the difference from the previous hand-rolled reducer: `STATE_DELTA`
+JSON-Patch is **no longer applied in app code**. `HttpAgent` applies the patch to
+its internal `state` (via `fast-json-patch`) and fires `onStateChanged`; the
+service simply copies the reduced object into the `agentState` signal.
+
+## Why `@ag-ui/client` `HttpAgent` (not `EventSource`, not a hand-rolled parser)
 
 The browser's `EventSource` API only supports `GET` requests. AG-UI uses
-`POST + SSE` to allow a structured `RunAgentInput` payload, which means we have
-to consume the SSE stream via `fetch()` + `ReadableStream` and parse the wire
-format manually. The parser in `agent.service.ts` handles:
+`POST + SSE` to carry a structured `RunAgentInput` payload, so the stream has to
+be consumed via `fetch()` + `ReadableStream`. An earlier iteration of this demo
+parsed that wire format by hand (frame boundaries, `event:`/`data:` lines,
+multi-line `data:` continuations, partial frames across reads) and applied
+JSON-Patch by hand. The S2 spike replaced all of that (~250 lines) with the
+first-party `@ag-ui/client` `HttpAgent`, which provides:
 
-- Frame boundaries (`\n\n`)
-- `event: <name>` and `data: <json>` lines
-- Multi-line `data:` continuations (concatenated)
-- Comment lines starting with `:` (skipped)
-- Stream-level partial frames buffered across reads
+- the POST + SSE transport (with a `fetch` we bind to `window` so its `this` is
+  correct under zoneless Angular — a detached `fetch` throws "Illegal
+  invocation");
+- event-sequence verification (`verifyEvents`);
+- [RFC 6902](https://www.rfc-editor.org/rfc/rfc6902) JSON-Patch state reduction
+  via `fast-json-patch` — supporting nested paths and full op semantics, not the
+  tiny `add`/`replace` subset the hand-rolled patcher covered.
 
-## Why we apply JSON-Patch manually
-
-`STATE_DELTA` events carry [RFC 6902](https://www.rfc-editor.org/rfc/rfc6902)
-JSON-Patch arrays. The demo only emits `add` / `replace` operations on top-level
-paths, so the patcher in `agent.service.ts` covers a tiny subset by hand. In
-production code, a real JSON-Patch library such as `fast-json-patch` should be
-used to support nested paths, `move`/`copy`/`test`, and proper error semantics.
+`AgentService` keeps only the Angular-specific concern: subscribing and mirroring
+into signals. The hand-rolled parser remains in git history as an escape hatch if
+the pre-1.0 SDK stalls.
 
 ## Zoneless change detection
 
@@ -100,8 +113,8 @@ call on a signal causes Angular to re-render exactly the affected templates.
 
 ## Streaming Resource API
 
-In a follow-up iteration, the manual `fetch()` reducer in `agent.service.ts`
-could be wrapped in Angular 20's experimental `streamingResource()` to expose
-the stream as a `Resource<Message[]>` with native `status` / `error` /
-`isLoading` signals. The current implementation keeps the reducer explicit so
-it is easy to audit the wire format and reducer behaviour.
+In a follow-up iteration, the `HttpAgent` run in `agent.service.ts` could be
+wrapped in Angular 20's experimental `streamingResource()` to expose the stream
+as a `Resource<Message[]>` with native `status` / `error` / `isLoading` signals.
+The current implementation keeps the subscriber explicit so the mapping from
+AG-UI events to signals is easy to audit.
